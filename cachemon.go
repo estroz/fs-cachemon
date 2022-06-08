@@ -10,9 +10,53 @@ import (
 	"time"
 )
 
+func NewCache(rootDir string) *Cache {
+	return &Cache{
+		root: &afs{
+			root: rootDir,
+		},
+	}
+}
+
+type Cache struct {
+	root FS
+}
+
+func (c *Cache) Put(filePath string) error {
+	return c.updateMonFile(filePath)
+}
+
+func (c *Cache) Get(filePath string) (bool, error) {
+	if _, err := c.root.Stat(filePath); errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return true, c.updateMonFile(filePath)
+}
+
+func (c *Cache) Delete(filePath string) error {
+	return c.root.RemoveAll(filePath + monSuffix)
+}
+
+const monSuffix = ".mon"
+
+func (c *Cache) updateMonFile(filePath string) error {
+
+	filePath += monSuffix
+	now := time.Now()
+	if cherr := c.root.Chtimes(filePath, now, now); cherr != nil {
+		f, cerr := c.root.Create(filePath)
+		if cerr != nil {
+			return cerr
+		}
+		return f.Close()
+	}
+
+	return nil
+}
+
 type Options struct {
 	Interval     time.Duration
-	MaxSizeBytes uint64
+	MaxSizeBytes int64
 }
 
 const (
@@ -34,7 +78,7 @@ func Run(ctx context.Context, rootDir string, opts *Options) (*FileChan, error) 
 		return nil, err
 	}
 
-	return run(ctx, &statFS{os.DirFS(rootDir)}, opts)
+	return run(ctx, &afs{root: rootDir}, opts)
 }
 
 func RunBackground(ctx context.Context, rootDir string, opts *Options, f func(*Result)) error {
@@ -55,13 +99,7 @@ func RunBackground(ctx context.Context, rootDir string, opts *Options, f func(*R
 	return nil
 }
 
-type statFS struct {
-	fs.FS
-}
-
-func (sfs *statFS) Stat(name string) (fs.FileInfo, error) { return fs.Stat(sfs.FS, name) }
-
-func run(ctx context.Context, root fs.StatFS, opts *Options) (*FileChan, error) {
+func run(ctx context.Context, root FS, opts *Options) (*FileChan, error) {
 	fc := &FileChan{}
 	fc.root = root
 	fc.maxSize = opts.MaxSizeBytes
@@ -74,11 +112,9 @@ func run(ctx context.Context, root fs.StatFS, opts *Options) (*FileChan, error) 
 }
 
 type FileChan struct {
-	root     fs.StatFS
-	maxSize  uint64
+	root     FS
+	maxSize  int64
 	interval time.Duration
-
-	state fileState
 
 	ch      chan *Result
 	doneCtx context.Context
@@ -133,11 +169,6 @@ func (fc *FileChan) run(ctx context.Context) {
 		default:
 		}
 
-		if err := fc.rebuild(); err != nil {
-			fc.err = err
-			return
-		}
-
 		expired, err := fc.getExpired()
 		if err != nil {
 			fc.err = err
@@ -159,12 +190,12 @@ func (fc *FileChan) run(ctx context.Context) {
 	}
 }
 
-// TODO: consider using https://github.com/fsnotify/fsnotify
 // TODO: build a min heap instead of flat structure.
 
-func (fc *FileChan) rebuild() error {
+func (fc *FileChan) getExpired() ([]*finfo, error) {
 
-	fc.state = fileState{}
+	var size int64
+	finfos := []*finfo{}
 	err := fs.WalkDir(fc.root, ".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -173,53 +204,21 @@ func (fc *FileChan) rebuild() error {
 			return nil
 		}
 
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
+		if monInfo, err := fc.root.Stat(path + monSuffix); err == nil || errors.Is(err, os.ErrExist) {
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
 
-		fc.state[path] = &finfo{info: info}
+			size += info.Size()
+			finfos = append(finfos, &finfo{
+				info: info,
+				mt:   monInfo.ModTime(),
+			})
+		}
 
 		return nil
 	})
-
-	return err
-}
-
-type finfo struct {
-	info fs.FileInfo
-}
-
-type fileState map[string]*finfo
-
-func (s fileState) getTimeSortedAsc() []*finfo {
-	finfos := make([]*finfo, len(s))
-
-	i := 0
-	for _, fi := range s {
-		finfos[i] = fi
-		i++
-	}
-
-	sort.Slice(finfos, func(i, j int) bool {
-		return finfos[i].info.ModTime().Before(finfos[j].info.ModTime())
-	})
-
-	return finfos
-}
-
-func (s fileState) getCurrentSize() (uint64, error) {
-
-	var size uint64
-	for _, fi := range s {
-		size += uint64(fi.info.Size())
-	}
-
-	return size, nil
-}
-
-func (fc *FileChan) getExpired() ([]*finfo, error) {
-	size, err := fc.state.getCurrentSize()
 	if err != nil {
 		return nil, err
 	}
@@ -228,17 +227,24 @@ func (fc *FileChan) getExpired() ([]*finfo, error) {
 		return nil, nil
 	}
 
-	finfosSorted := fc.state.getTimeSortedAsc()
+	sort.SliceStable(finfos, func(i, j int) bool {
+		return finfos[i].mt.Before(finfos[j].mt)
+	})
 
 	i := 0
-	for ; i < len(finfosSorted); i++ {
-		if size -= uint64(finfosSorted[i].info.Size()); size <= fc.maxSize {
+	for ; i < len(finfos); i++ {
+		if size -= finfos[i].info.Size(); size <= fc.maxSize {
 			i++
 			break
 		}
 	}
 
-	finfosOut := finfosSorted[:i]
+	finfosOut := finfos[:i]
 
 	return finfosOut, nil
+}
+
+type finfo struct {
+	info fs.FileInfo
+	mt   time.Time
 }

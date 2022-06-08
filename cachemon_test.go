@@ -24,31 +24,33 @@ func testFileChanInMemory(t *testing.T) {
 
 	root := internal.NewConcurrentMapFS(fstest.MapFS{
 		"a": &fstest.MapFile{
-			Data:    makeDataSize(t, 100),
-			ModTime: time.Unix(1654550011, 0),
+			Data: makeDataSize(t, 100),
 		},
 		"b": &fstest.MapFile{
-			Data:    makeDataSize(t, 100),
-			ModTime: time.Unix(1654550010, 0),
+			Data: makeDataSize(t, 100),
 		},
 		"c": &fstest.MapFile{
-			Data:    makeDataSize(t, 200),
-			ModTime: time.Unix(1654550009, 0),
+			Data: makeDataSize(t, 200),
 		},
 		"d": &fstest.MapFile{
-			Data:    makeDataSize(t, 400),
-			ModTime: time.Unix(1654550008, 0),
+			Data: makeDataSize(t, 400),
 		},
 		"e": &fstest.MapFile{
-			Data:    makeDataSize(t, 200),
-			ModTime: time.Unix(1654550007, 0),
+			Data: makeDataSize(t, 200),
 		},
 		"f": &fstest.MapFile{
-			Data:    makeDataSize(t, 1),
-			ModTime: time.Unix(1654550006, 0),
+			Data: makeDataSize(t, 1),
 		},
 	})
-	require.NoError(t, fstest.TestFS(root, "a", "b", "c", "d", "e", "f"))
+	expected := []string{"f", "a", "b", "c", "d", "e"}
+	require.NoError(t, fstest.TestFS(root, expected...))
+
+	cache := &Cache{root: root}
+
+	for _, exp := range expected {
+		require.NoError(t, cache.Put(exp))
+	}
+	require.NoError(t, fstest.TestFS(root, genExpected(expected...)...))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 
@@ -70,31 +72,33 @@ func testFileChanInMemory(t *testing.T) {
 	require.Equal(t, &Result{"f"}, result12)
 
 	root.Delete("f")
-	require.NoError(t, fstest.TestFS(root, "a", "b", "c", "d", "e"))
+	require.NoError(t, cache.Delete("f"))
+	require.NoError(t, fstest.TestFS(root, genExpected("a", "b", "c", "d", "e")...))
 
 	root.Add("g", &fstest.MapFile{
-		Data:    makeDataSize(t, 10),
-		ModTime: time.Unix(1654550000, 0),
+		Data: makeDataSize(t, 50),
 	})
+	require.NoError(t, cache.Put("g"))
 	root.Add("h", &fstest.MapFile{
-		Data:    makeDataSize(t, 10),
-		ModTime: time.Unix(1654550001, 0),
+		Data: makeDataSize(t, 51),
 	})
-	require.NoError(t, fstest.TestFS(root, "a", "b", "c", "d", "e", "g", "h"))
+	require.NoError(t, cache.Put("h"))
+	require.NoError(t, fstest.TestFS(root, genExpected("a", "b", "c", "d", "e", "g", "h")...))
 
 	hasMore21 := fc.Next()
 	require.NoError(t, fc.Err())
 	require.True(t, hasMore21)
 	result21 := fc.Get()
-	require.Equal(t, &Result{"g"}, result21)
+	require.Equal(t, &Result{"a"}, result21)
 
-	root.Delete("g")
+	root.Delete("a")
+	require.NoError(t, cache.Delete("a"))
 
 	hasMore22 := fc.Next()
 	require.NoError(t, fc.Err())
 	require.True(t, hasMore22)
 	result22 := fc.Get()
-	require.Equal(t, &Result{"h"}, result22)
+	require.Equal(t, &Result{"b"}, result22)
 
 	cancel()
 
@@ -121,4 +125,11 @@ func makeDataSize(t *testing.T, n int) []byte {
 	_, err := rand.Read(b)
 	require.NoError(t, err)
 	return b
+}
+
+func genExpected(expected ...string) (out []string) {
+	for _, exp := range expected {
+		out = append(out, exp, exp+monSuffix)
+	}
+	return out
 }
