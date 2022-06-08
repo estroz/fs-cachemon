@@ -1,11 +1,13 @@
 # fs-cachemon
 
-This is a Go library for detecting a size bound violation on a directory,
-intended to be used as a simple filesystem cache monitor.
+This is a Go library for caching files and detecting a size bound violation on a directory,
+intended to be used as a simple filesystem cache and monitor.
 
-Files least recently changed (LRU) are returned by `Get()` when the size of
+The cache supports `Put`, `Get`, and `Delete` operations, which should be invoked
+after each corresponding file interaction, ex. `os.Create` or `os.Open` followed by `Put`.
+Files least recently changed (LRU) are returned by `FileChan.Get()` when the size of
 the monitor's root directory exceeds the specified limit;
-these files should be deleted to be fully evicted from the cache.
+these files should be `Delete`d to be fully evicted from the cache.
 
 ## Example
 
